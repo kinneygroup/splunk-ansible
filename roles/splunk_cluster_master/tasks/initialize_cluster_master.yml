@@ -19,6 +19,26 @@
 - include_tasks: enable_smartstore.yml
   when: splunk.smartstore
 
+- name: Get current indexer cluster config
+  command: "{{ splunk.exec }} btool server list clustering"
+  become: true
+  become_user: "{{ splunk.user }}"
+  register: cluster_master_config
+  changed_when: false
+  ignore_errors: true
+
+- name: Decrypt current indexer cluster pass4SymmKey
+  command: "{{ splunk.exec }} show-decrypted --value '{{ encrypted_key }}'"
+  register: cm_decrypted_key_result
+  changed_when: false
+  ignore_errors: true
+  no_log: "{{ hide_password }}"
+  vars:
+    encrypted_key: "{{ cluster_master_config.stdout_lines | select('match', 'pass4SymmKey = ')|list|first|default('') | regex_replace('^pass4SymmKey = (.*)$', '\\1') }}"
+  when:
+    - cluster_master_config.rc == 0
+    - encrypted_key|default('')|length > 0
+
 - name: Set the current node as a Splunk indexer cluster master
   command: "{{ splunk.exec }} edit cluster-config -mode master -replication_factor {{ splunk.idxc.replication_factor }} -search_factor {{ splunk.idxc.search_factor }} -secret '{{ splunk.idxc.pass4SymmKey }}' -cluster_label '{{ splunk.idxc.label }}' -auth '{{ splunk.admin_user }}:{{ splunk.password }}'"
   register: task_result
@@ -31,6 +51,14 @@
   become: yes
   become_user: "{{ splunk.user }}"
   no_log: "{{ hide_password }}"
+  when: >
+    (cm_decrypted_key_result is skipped)
+    or (cm_decrypted_key_result.rc != 0)
+    or (cm_decrypted_key_result.stdout != splunk.idxc.pass4SymmKey)
+    or ('mode = master' not in cluster_master_config.stdout_lines)
+    or ('cluster_label = ' + splunk.idxc.label not in cluster_master_config.stdout_lines)
+    or ('search_factor = ' + splunk.idxc.search_factor|string not in cluster_master_config.stdout_lines)
+    or ('replication_factor = ' + splunk.idxc.replication_factor|string not in cluster_master_config.stdout_lines)
 
 - name: Flush restart handlers
   meta: flush_handlers
