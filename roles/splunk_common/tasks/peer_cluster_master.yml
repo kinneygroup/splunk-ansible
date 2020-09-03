@@ -3,9 +3,29 @@
   vars:
     splunk_instance_address: "{{ splunk.cluster_master_url }}"
 
+- name: Get current indexer cluster config
+  command: "{{ splunk.exec }} btool server list clustering"
+  become: true
+  become_user: "{{ splunk.user }}"
+  register: sh_cluster_config
+  changed_when: false
+  ignore_errors: true
+
+- name: Decrypt current indexer cluster pass4SymmKey
+  command: "{{ splunk.exec }} show-decrypted --value '{{ encrypted_key }}'"
+  register: sh_decrypted_key_result
+  changed_when: false
+  ignore_errors: true
+  no_log: "{{ hide_password }}"
+  vars:
+    encrypted_key: "{{ sh_cluster_config.stdout_lines | select('match', 'pass4SymmKey = ')|list|first|default('') | regex_replace('^pass4SymmKey = (.*)$', '\\1') }}"
+  when:
+    - sh_cluster_config.rc == 0
+    - encrypted_key|default('')|length > 0
+
 # http://docs.splunk.com/Documentation/Splunk/latest/DistSearch/SHCandindexercluster#Integrate_with_a_single-site_indexer_cluster
 - name: Peer cluster master
-  command: "{{ splunk.exec }} edit cluster-config -mode searchhead -master_uri {{ cert_prefix }}://{{ splunk.cluster_master_url }}:{{ splunk.svc_port }} -replication_port {{ splunk.idxc.replication_port }} -secret '{{ splunk.idxc.pass4SymmKey }}' -auth '{{ splunk.admin_user }}:{{ splunk.password }}'"
+  command: "{{ splunk.exec }} edit cluster-config -mode searchhead -master_uri {{ master_uri }} -secret '{{ splunk.idxc.pass4SymmKey }}' -auth '{{ splunk.admin_user }}:{{ splunk.password }}'"
   become: yes
   become_user: "{{ splunk.user }}"
   register: peer_cluster_master
@@ -18,6 +38,14 @@
   notify:
     - Restart the splunkd service
   no_log: "{{ hide_password }}"
+  vars:
+    master_uri: "{{ cert_prefix }}://{{ splunk.cluster_master_url }}:{{ splunk.svc_port }}"
+  when: >
+    (sh_decrypted_key_result is skipped)
+    or (sh_decrypted_key_result.rc != 0)
+    or (sh_decrypted_key_result.stdout != splunk.idxc.pass4SymmKey)
+    or ('mode = searchhead' not in sh_cluster_config.stdout_lines)
+    or ('master_uri = ' + master_uri not in sh_cluster_config.stdout_lines)
 
 - include_tasks: peer_aux_cluster_masters.yml
   when:
