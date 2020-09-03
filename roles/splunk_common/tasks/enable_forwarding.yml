@@ -1,22 +1,56 @@
 ---
 # Configure forwarding to indexer cluster master
 # See: https://docs.splunk.com/Documentation/Splunk/latest/Indexer/indexerdiscovery
-- name: Setup indexer discovery for index-clustering
+- name: Get current indexer discovery config
+  command: "{{ splunk.exec }} btool outputs list indexer_discovery:splunk-indexer"
+  become: true
+  become_user: "{{ splunk.user }}"
+  register: indexer_discovery_config
+  changed_when: false
+  ignore_errors: true
+  when:
+    - splunk_indexer_cluster | bool
+
+- name: Decrypt current indexer discovery pass4SymmKey
+  command: "{{ splunk.exec }} show-decrypted --value '{{ encrypted_key }}'"
+  register: decrypted_key_result
+  changed_when: false
+  ignore_errors: true
+  no_log: "{{ hide_password }}"
+  vars:
+    encrypted_key: "{{ indexer_discovery_config.stdout_lines | select('match', 'pass4SymmKey = ')|list|first|default('') | regex_replace('^pass4SymmKey = (.*)$', '\\1') }}"
+  when:
+    - splunk_indexer_cluster | bool
+    - indexer_discovery_config.rc == 0
+    - encrypted_key|default('')|length > 0
+
+# To preserve idempotency, only set pass4SymmKey if decrypted value does not match
+- name: Setup indexer discovery for index-clustering (pass4SymmKey)
   ini_file:
     path: "{{ splunk.home }}/etc/system/local/outputs.conf"
     section: "indexer_discovery:splunk-indexer"
-    option: "{{ item.key }}"
-    value: "{{ item.value }}"
+    option: pass4SymmKey
+    value: "{{ splunk.idxc.discoveryPass4SymmKey|default(splunk.idxc.pass4SymmKey, true) }}"
     owner: "{{ splunk.user }}"
     group: "{{ splunk.group }}"
-  with_items:
-    - {key: "pass4SymmKey", value: "{{ splunk.idxc.discoveryPass4SymmKey if splunk.idxc.discoveryPass4SymmKey is defined and splunk.idxc.discoveryPass4SymmKey else splunk.idxc.pass4SymmKey }}"}
-    - {key: "master_uri", value: "{{ cert_prefix }}://{{ splunk.cluster_master_url }}:{{ splunk.svc_port }}"}
+  when:
+    - splunk_indexer_cluster|bool
+    - decrypted_key_result.stdout|default('') != (splunk.idxc.discoveryPass4SymmKey|default(splunk.idxc.pass4SymmKey, true))
+  no_log: "{{ hide_password }}"
+  register: indexer_discovery_pass4SymmKey
+
+- name: Setup indexer discovery for index-clustering (master_uri)
+  ini_file:
+    path: "{{ splunk.home }}/etc/system/local/outputs.conf"
+    section: "indexer_discovery:splunk-indexer"
+    option: master_uri
+    value: "{{ cert_prefix }}://{{ splunk.cluster_master_url }}:{{ splunk.svc_port }}"
+    owner: "{{ splunk.user }}"
+    group: "{{ splunk.group }}"
   when:
     - splunk_indexer_cluster | bool
-    - item.value | length > 0
   no_log: "{{ hide_password }}"
-  register: indexer_discovery
+  register: indexer_discovery_master_uri
 
 - name: Setup tcpout group for index-clustering
   ini_file:
@@ -89,6 +123,8 @@
 # We want to restart only when Splunk is currently running and when any of the above have changed
 - name: Trigger restart
   command: ls
-  changed_when: splunk_status.rc == 0 and (indexer_discovery is changed or tcpout_group is changed or default_tcpout_group is changed or index_disabling is changed)
+  changed_when: splunk_status.rc == 0 and
+    (indexer_discovery_pass4SymmKey is changed or indexer_discovery_master_uri is changed
+    or tcpout_group is changed or default_tcpout_group is changed or index_disabling is changed)
   notify:
     - Restart the splunkd service
