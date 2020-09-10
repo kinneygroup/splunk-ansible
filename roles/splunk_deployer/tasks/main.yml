@@ -1,4 +1,24 @@
 ---
+- name: Get current shcluster config
+  command: "{{ splunk.exec }} btool server list shclustering"
+  become: true
+  become_user: "{{ splunk.user }}"
+  register: deployer_shcluster_config
+  changed_when: false
+  ignore_errors: true
+
+- name: Decrypt current indexer cluster pass4SymmKey
+  command: "{{ splunk.exec }} show-decrypted --value '{{ encrypted_key }}'"
+  register: dp_decrypted_key_result
+  changed_when: false
+  ignore_errors: true
+  no_log: "{{ hide_password }}"
+  vars:
+    encrypted_key: "{{ deployer_shcluster_config.stdout_lines | select('match', 'pass4SymmKey = ')|list|first|default('') | regex_replace('^pass4SymmKey = (.*)$', '\\1') }}"
+  when:
+    - deployer_shcluster_config.rc == 0
+    - encrypted_key|default('')|length > 0
+
 # TODO: Maybe we can make this a REST call?
 - name: Set deployer SHC key and label
   ini_file:
@@ -17,6 +37,11 @@
   no_log: "{{ hide_password }}"
   notify:
     - Restart the splunkd service
+  when: >
+    (dp_decrypted_key_result is skipped)
+    or (dp_decrypted_key_result.rc != 0)
+    or (dp_decrypted_key_result.stdout != splunk.shc.pass4SymmKey)
+    or ('shcluster_label = ' + splunk.shc.label|string not in deployer_shcluster_config.stdout_lines)
 
 # https://docs.splunk.com/Documentation/Splunk/latest/DistSearch/PropagateSHCconfigurationchanges#Set_the_deployer_push_mode
 - name: Set deployer push mode
